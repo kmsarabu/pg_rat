@@ -1,0 +1,5 @@
+# pg_rat extension
+comment = 'Real Application Testing - workload capture, replay, and SQL performance analysis'
+default_version = '1.0'
+module_pathname = '$libdir/pg_rat'
+relocatable = false
