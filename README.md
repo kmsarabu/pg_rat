@@ -1,4 +1,4 @@
-# pg_rat: Real Application Testing for PostgreSQL
+# :rat: pg_rat: Real Application Testing for PostgreSQL
 
 `pg_rat` is a high-performance PostgreSQL extension designed for **Real Application Testing (RAT)** and **SQL Performance Analysis (SPA)**. It allows database administrators to capture production workloads with minimal overhead, replay them with original concurrency and timing on a target system, and generate comprehensive HTML regression reports.
 
