@@ -20,16 +20,8 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 *   `make` and `gcc` (or `meson` / `ninja`)
 
 ### Build and Install
-For a standalone installation (after downloading the source):
 ```bash
 cd pg_rat
-make USE_PGXS=1
-sudo make USE_PGXS=1 install
-```
-
-If you are building this within the PostgreSQL source tree (as a contrib module):
-```bash
-cd contrib/pg_rat
 make
 sudo make install
 ```
@@ -81,3 +73,4 @@ SELECT pg_rat_generate_report();
 
 ## 📝 License
 PostgreSQL License
+
