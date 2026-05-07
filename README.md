@@ -73,4 +73,3 @@ SELECT pg_rat_generate_report();
 
 ## 📝 License
 PostgreSQL License
-

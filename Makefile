@@ -1,4 +1,4 @@
-# contrib/pg_rat/Makefile
+# pg_rat/Makefile
 
 MODULE_big = pg_rat
 OBJS = \
@@ -15,16 +15,20 @@ EXTENSION = pg_rat
 DATA = pg_rat--1.0.sql
 PGFILEDESC = "pg_rat - Real Application Testing for PostgreSQL"
 
-# The module can be built either as a contrib module in a Postgres source tree
-# or as a standalone extension using PGXS.
+# Auto-detect if we are being built as a contrib module or standalone.
+# If ../../src/Makefile.global exists, assume contrib. Otherwise, use PGXS.
+ifeq ($(wildcard ../../src/Makefile.global),)
+USE_PGXS = 1
+endif
+
 ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
-# When building standalone, we must link directly to libpq
+# Link against libpq in standalone mode
 SHLIB_LINK += -lpq
 else
-# When building as contrib, we link to the internal libpq build
+# Contrib build logic
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
 SHLIB_PREREQS = submake-libpq

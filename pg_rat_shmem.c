@@ -94,13 +94,13 @@ rat_shmem_init(void *arg)
 	pg_atomic_init_u64(&rat_shared_state->replay_errors, 0);
 
 	/* Initialize the ring buffer (already allocated by ShmemRequestStruct) */
-	SpinLockInit(&rat_ring_buffer->lock);
-	rat_ring_buffer->head = 0;
-	rat_ring_buffer->tail = 0;
+	pg_atomic_init_u64(&rat_ring_buffer->head, 0);
+	pg_atomic_init_u64(&rat_ring_buffer->tail, 0);
 	rat_ring_buffer->capacity = rat_ring_buffer_size;
 	pg_atomic_init_u64(&rat_ring_buffer->dropped_events, 0);
-	memset(rat_ring_buffer->events, 0,
-		   sizeof(RatEvent) * rat_ring_buffer_size);
+	
+	for (int i = 0; i < rat_ring_buffer_size; i++)
+		pg_atomic_init_u32(&rat_ring_buffer->events[i].status, RAT_SLOT_EMPTY);
 }
 
 /*
@@ -113,35 +113,64 @@ rat_shmem_init(void *arg)
  * full (event is dropped in that case).
  */
 bool
-rat_ring_buffer_push(RatEvent *event)
+rat_ring_buffer_push(RatEventMeta *meta, const char *query_text, int query_len)
 {
-	int			next_head;
-	bool		inserted = false;
+	uint64		head, tail;
+	uint32		idx;
+	RatEvent   *slot;
 
 	if (rat_ring_buffer == NULL)
 		return false;
 
-	SpinLockAcquire(&rat_ring_buffer->lock);
+	/* Reserve a slot atomically */
+	do {
+		head = pg_atomic_read_u64(&rat_ring_buffer->head);
+		tail = pg_atomic_read_u64(&rat_ring_buffer->tail);
 
-	next_head = (rat_ring_buffer->head + 1) % rat_ring_buffer->capacity;
+		/* Check if buffer is full */
+		if (head - tail >= rat_ring_buffer->capacity)
+		{
+			pg_atomic_fetch_add_u64(&rat_ring_buffer->dropped_events, 1);
+			return false;
+		}
 
-	if (next_head != rat_ring_buffer->tail)
+	} while (!pg_atomic_compare_exchange_u64(&rat_ring_buffer->head, &head, head + 1));
+
+	/* We have claimed slot 'head' */
+	idx = (uint32) (head % rat_ring_buffer->capacity);
+	slot = &rat_ring_buffer->events[idx];
+
+	/* Wait if the slot hasn't been emptied by flusher yet (rare) */
+	while (pg_atomic_read_u32(&slot->status) != RAT_SLOT_EMPTY)
 	{
-		/* Buffer has space -- copy the event in */
-		memcpy(&rat_ring_buffer->events[rat_ring_buffer->head],
-			   event, sizeof(RatEvent));
-		rat_ring_buffer->head = next_head;
-		inserted = true;
+		/* Low-overhead spin-wait without system calls */
+		SPIN_DELAY();
 	}
-	else
+
+	/* Mark busy and write metadata directly to shmem */
+	pg_atomic_write_u32(&slot->status, RAT_SLOT_BUSY);
+	
+	slot->timestamp = meta->timestamp;
+	slot->session_id = meta->session_id;
+	slot->transaction_id = meta->transaction_id;
+	slot->event_type = meta->event_type;
+	slot->duration_ms = meta->duration_ms;
+	slot->rows = meta->rows;
+	slot->shared_blks_hit = meta->shared_blks_hit;
+	slot->shared_blks_read = meta->shared_blks_read;
+	slot->query_len = query_len;
+
+	/* Copy ONLY the query bytes we actually have */
+	if (query_text && query_len > 0)
 	{
-		/* Buffer is full -- drop the event */
-		pg_atomic_fetch_add_u64(&rat_ring_buffer->dropped_events, 1);
+		memcpy(slot->query_text, query_text, query_len);
 	}
+	slot->query_text[query_len] = '\0';
 
-	SpinLockRelease(&rat_ring_buffer->lock);
+	/* Mark ready for flusher */
+	pg_atomic_write_u32(&slot->status, RAT_SLOT_READY);
 
-	return inserted;
+	return true;
 }
 
 /*
@@ -156,22 +185,35 @@ int
 rat_ring_buffer_drain(RatEvent *out_buf, int max_events)
 {
 	int			count = 0;
+	uint64		tail;
 
 	if (rat_ring_buffer == NULL)
 		return 0;
 
-	SpinLockAcquire(&rat_ring_buffer->lock);
+	tail = pg_atomic_read_u64(&rat_ring_buffer->tail);
 
-	while (count < max_events && rat_ring_buffer->tail != rat_ring_buffer->head)
+	while (count < max_events)
 	{
-		memcpy(&out_buf[count],
-			   &rat_ring_buffer->events[rat_ring_buffer->tail],
-			   sizeof(RatEvent));
-		rat_ring_buffer->tail = (rat_ring_buffer->tail + 1) % rat_ring_buffer->capacity;
+		uint32		idx = (uint32) (tail % rat_ring_buffer->capacity);
+		RatEvent   *slot = &rat_ring_buffer->events[idx];
+
+		/* Only drain if the slot is fully written */
+		if (pg_atomic_read_u32(&slot->status) != RAT_SLOT_READY)
+			break;
+
+		/* Copy data out */
+		memcpy(out_buf + count, slot, sizeof(RatEvent));
+		
+		/* Mark slot as empty for backends to reuse */
+		pg_atomic_write_u32(&slot->status, RAT_SLOT_EMPTY);
+
+		tail++;
 		count++;
 	}
 
-	SpinLockRelease(&rat_ring_buffer->lock);
+	/* Update global tail after batching */
+	if (count > 0)
+		pg_atomic_write_u64(&rat_ring_buffer->tail, tail);
 
 	return count;
 }

@@ -40,7 +40,7 @@ typedef struct QueryCompletion QueryCompletion;
  * Constants
  * ----------------
  */
-#define RAT_MAX_QUERY_LEN		4096	/* max query text length per event */
+#define RAT_MAX_QUERY_LEN		1024	/* max query text length per event */
 #define RAT_DEFAULT_RING_SIZE	8192	/* default ring buffer slot count */
 #define RAT_MAX_RING_SIZE		65536	/* maximum ring buffer slot count */
 #define RAT_CAPTURE_NAME_LEN	128		/* max capture session name */
@@ -61,20 +61,27 @@ typedef enum RatEventType
 	RAT_EVENT_TXN_ROLLBACK		/* ROLLBACK */
 } RatEventType;
 
+typedef enum RatSlotStatus
+{
+	RAT_SLOT_EMPTY = 0,
+	RAT_SLOT_BUSY,
+	RAT_SLOT_READY
+} RatSlotStatus;
+
 /* ----------------
  * Captured Event
  *
  * This struct is placed directly into the shared memory ring buffer.
- * No pointers, no palloc — everything is fixed-size for spinlock-safe
- * memcpy on the hot path.
+ * No pointers, no palloc — everything is fixed-size for atomic operations.
  * ----------------
  */
 typedef struct RatEvent
 {
+	pg_atomic_uint32 status;				/* RAT_SLOT_xxx */
 	TimestampTz timestamp;					/* event timestamp, usec precision */
 	uint32		session_id;					/* hash of PID + session start */
 	uint32		transaction_id;				/* virtual transaction id */
-	uint16		event_type;					/* RatEventType */
+	RatEventType event_type;				/* RatEventType */
 	double		duration_ms;				/* execution time in milliseconds */
 	int64		rows;						/* rows affected/returned */
 	int64		shared_blks_hit;			/* shared buffer hits */
@@ -83,19 +90,31 @@ typedef struct RatEvent
 	char		query_text[RAT_MAX_QUERY_LEN]; /* truncated query text */
 } RatEvent;
 
+/* Metadata only struct for efficient passing to push function */
+typedef struct RatEventMeta
+{
+	TimestampTz timestamp;
+	uint32		session_id;
+	uint32		transaction_id;
+	RatEventType event_type;
+	double		duration_ms;
+	int64		rows;
+	int64		shared_blks_hit;
+	int64		shared_blks_read;
+} RatEventMeta;
+
 /* ----------------
  * Ring Buffer
  *
  * Fixed-size circular buffer of RatEvent structs in shared memory.
- * Protected by a spinlock for minimal overhead on the hot path.
+ * Uses atomic head/tail for lock-free concurrency.
  * ----------------
  */
 typedef struct RatRingBuffer
 {
-	slock_t		lock;			/* spinlock protecting head/tail */
-	int			head;			/* next write position */
-	int			tail;			/* next read position */
-	int			capacity;		/* total slot count */
+	pg_atomic_uint64 head;				/* Next sequence number to fill */
+	pg_atomic_uint64 tail;				/* Next sequence number to drain */
+	int			capacity;				/* total slot count */
 	pg_atomic_uint64 dropped_events;	/* events dropped due to full buffer */
 	RatEvent	events[FLEXIBLE_ARRAY_MEMBER];
 } RatRingBuffer;
@@ -169,7 +188,7 @@ extern void rat_ProcessUtility(PlannedStmt *pstmt,
 extern Size rat_shmem_size(void);
 extern void rat_shmem_request(void *arg);
 extern void rat_shmem_init(void *arg);
-extern bool rat_ring_buffer_push(RatEvent *event);
+extern bool rat_ring_buffer_push(RatEventMeta *meta, const char *query_text, int query_len);
 extern int	rat_ring_buffer_drain(RatEvent *out_buf, int max_events);
 
 /* ----------------

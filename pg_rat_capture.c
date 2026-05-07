@@ -45,7 +45,7 @@
 void
 rat_ExecutorEnd(QueryDesc *queryDesc)
 {
-	RatEvent	event;
+	RatEventMeta meta;
 	const char *query_text;
 	int			qlen;
 
@@ -53,54 +53,44 @@ rat_ExecutorEnd(QueryDesc *queryDesc)
 	if (queryDesc->sourceText == NULL)
 		return;
 
-	memset(&event, 0, sizeof(RatEvent));
-
-	event.timestamp = GetCurrentTimestamp();
-	event.session_id = rat_compute_session_id();
+	meta.timestamp = GetCurrentTimestamp();
+	meta.session_id = rat_compute_session_id();
 
 	/* Use the current virtual transaction ID as our transaction_id */
 	{
 		LocalTransactionId lxid = MyProc ? MyProc->vxid.lxid : InvalidLocalTransactionId;
-
-		event.transaction_id = (uint32) lxid;
+		meta.transaction_id = (uint32) lxid;
 	}
 
-	event.event_type = RAT_EVENT_QUERY_END;
+	meta.event_type = RAT_EVENT_QUERY_END;
 
 	/* Timing: if instrumentation is available, use it */
 	if (queryDesc->query_instr)
 	{
-		event.duration_ms = INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total);
-		event.shared_blks_hit = queryDesc->query_instr->bufusage.shared_blks_hit;
-		event.shared_blks_read = queryDesc->query_instr->bufusage.shared_blks_read;
+		meta.duration_ms = INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total);
+		meta.shared_blks_hit = queryDesc->query_instr->bufusage.shared_blks_hit;
+		meta.shared_blks_read = queryDesc->query_instr->bufusage.shared_blks_read;
 	}
 	else
 	{
-		event.duration_ms = 0.0;
-		event.shared_blks_hit = 0;
-		event.shared_blks_read = 0;
+		meta.duration_ms = 0.0;
+		meta.shared_blks_hit = 0;
+		meta.shared_blks_read = 0;
 	}
 
-	event.rows = queryDesc->estate->es_total_processed;
+	meta.rows = queryDesc->estate->es_total_processed;
 
-	/* Copy query text, truncating if necessary */
+	/* Copy query text pointer and length */
 	query_text = queryDesc->sourceText;
-	qlen = strlen(query_text);
+	qlen = (int) strlen(query_text);
 	if (qlen >= RAT_MAX_QUERY_LEN)
 		qlen = RAT_MAX_QUERY_LEN - 1;
-	memcpy(event.query_text, query_text, qlen);
-	event.query_text[qlen] = '\0';
-	event.query_len = qlen;
 
-	/* Push into ring buffer (non-blocking) */
-	rat_ring_buffer_push(&event);
+	/* Push into ring buffer directly */
+	rat_ring_buffer_push(&meta, query_text, qlen);
 
 	/* Increment total event counter */
 	pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
-
-	/* Wake the flusher BGW if it's sleeping */
-	if (rat_shared_state->bgw_latch)
-		SetLatch(rat_shared_state->bgw_latch);
 }
 
 /*
@@ -120,7 +110,7 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 				   DestReceiver *dest,
 				   QueryCompletion *qc)
 {
-	RatEvent	event;
+	RatEventMeta meta;
 	Node	   *parsetree = pstmt->utilityStmt;
 	const char *query_text;
 	int			qlen;
@@ -133,15 +123,12 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 	 * hasn't executed yet at this point, so duration will be 0 for the
 	 * pre-execution hook. We still capture it for replay ordering. */
 
-	memset(&event, 0, sizeof(RatEvent));
-
-	event.timestamp = GetCurrentTimestamp();
-	event.session_id = rat_compute_session_id();
+	meta.timestamp = GetCurrentTimestamp();
+	meta.session_id = rat_compute_session_id();
 
 	{
 		LocalTransactionId lxid = MyProc ? MyProc->vxid.lxid : InvalidLocalTransactionId;
-
-		event.transaction_id = (uint32) lxid;
+		meta.transaction_id = (uint32) lxid;
 	}
 
 	/* Classify the event type */
@@ -153,45 +140,38 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 		{
 			case TRANS_STMT_BEGIN:
 			case TRANS_STMT_START:
-				event.event_type = RAT_EVENT_TXN_BEGIN;
+				meta.event_type = RAT_EVENT_TXN_BEGIN;
 				break;
 			case TRANS_STMT_COMMIT:
-				event.event_type = RAT_EVENT_TXN_COMMIT;
+				meta.event_type = RAT_EVENT_TXN_COMMIT;
 				break;
 			case TRANS_STMT_ROLLBACK:
-				event.event_type = RAT_EVENT_TXN_ROLLBACK;
+				meta.event_type = RAT_EVENT_TXN_ROLLBACK;
 				break;
 			default:
-				event.event_type = RAT_EVENT_UTILITY;
+				meta.event_type = RAT_EVENT_UTILITY;
 				break;
 		}
 	}
 	else
 	{
-		event.event_type = RAT_EVENT_UTILITY;
+		meta.event_type = RAT_EVENT_UTILITY;
 	}
 
-	event.duration_ms = 0.0;	/* pre-execution capture */
-	event.rows = 0;
-	event.shared_blks_hit = 0;
-	event.shared_blks_read = 0;
+	meta.duration_ms = 0.0;	/* pre-execution capture */
+	meta.rows = 0;
+	meta.shared_blks_hit = 0;
+	meta.shared_blks_read = 0;
 
-	/* Copy query text */
+	/* Copy query text pointer and length */
 	query_text = queryString;
-	qlen = strlen(query_text);
+	qlen = (int) strlen(query_text);
 	if (qlen >= RAT_MAX_QUERY_LEN)
 		qlen = RAT_MAX_QUERY_LEN - 1;
-	memcpy(event.query_text, query_text, qlen);
-	event.query_text[qlen] = '\0';
-	event.query_len = qlen;
 
 	/* Push into ring buffer */
-	rat_ring_buffer_push(&event);
+	rat_ring_buffer_push(&meta, query_text, qlen);
 
 	/* Increment total counter */
 	pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
-
-	/* Wake flusher */
-	if (rat_shared_state->bgw_latch)
-		SetLatch(rat_shared_state->bgw_latch);
 }
