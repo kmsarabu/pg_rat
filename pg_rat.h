@@ -23,7 +23,6 @@
 #include "storage/latch.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
-#include "storage/spin.h"
 #include "utils/timestamp.h"
 
 #include "nodes/params.h"
@@ -77,15 +76,17 @@ typedef enum RatSlotStatus
  */
 typedef struct RatEvent
 {
-	pg_atomic_uint32 status;				/* RAT_SLOT_xxx */
+	/* 8-byte aligned fields first to minimize struct padding */
 	TimestampTz timestamp;					/* event timestamp, usec precision */
-	uint32		session_id;					/* hash of PID + session start */
-	uint32		transaction_id;				/* virtual transaction id */
-	RatEventType event_type;				/* RatEventType */
 	double		duration_ms;				/* execution time in milliseconds */
 	int64		rows;						/* rows affected/returned */
 	int64		shared_blks_hit;			/* shared buffer hits */
 	int64		shared_blks_read;			/* shared disk blocks read */
+	/* 4-byte fields packed together — no padding gaps */
+	uint32		session_id;					/* hash of PID + session start */
+	uint32		transaction_id;				/* virtual transaction id */
+	pg_atomic_uint32 status;				/* RAT_SLOT_xxx */
+	RatEventType event_type;				/* RatEventType */
 	int32		query_len;					/* actual length of query_text */
 	char		query_text[RAT_MAX_QUERY_LEN]; /* truncated query text */
 } RatEvent;
@@ -128,7 +129,7 @@ typedef struct RatRingBuffer
 typedef struct RatSharedState
 {
 	LWLockPadded lock;			/* protects non-ring-buffer state */
-	bool		capture_active; /* is capture currently running? */
+	pg_atomic_uint32 capture_active; /* is capture currently running? */
 	char		capture_name[RAT_CAPTURE_NAME_LEN]; /* current capture session */
 	TimestampTz capture_start;	/* when capture started */
 	pg_atomic_uint64 total_events;	/* total events captured */

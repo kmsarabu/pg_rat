@@ -160,21 +160,6 @@ rat_bgworker_main(Datum main_arg)
 		}
 	}
 
-	/* Attach to shared memory */
-	{
-		bool		found;
-
-		rat_shared_state = (RatSharedState *)
-			ShmemInitStruct("pg_rat", sizeof(RatSharedState), &found);
-		rat_ring_buffer = (RatRingBuffer *)
-			ShmemInitStruct("pg_rat ring buffer", rat_shmem_size(), &found);
-
-		if (!rat_shared_state || !rat_ring_buffer)
-		{
-			elog(ERROR, "pg_rat: could not attach to shared memory");
-			return;
-		}
-	}
 
 	/* Register our latch so capture code can wake us */
 	rat_shared_state->bgw_latch = MyLatch;
@@ -188,7 +173,7 @@ rat_bgworker_main(Datum main_arg)
 	escaped_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 2 + 16);
 
 	/* Line buffer for NDJSON output */
-	line_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 2 + 512);
+	line_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 2 + 1024);
 
 	/* Main loop */
 	for (;;)
@@ -217,7 +202,7 @@ rat_bgworker_main(Datum main_arg)
 			break;
 
 		/* If capture is not active, close any open file and sleep */
-		if (!rat_shared_state->capture_active)
+		if (!pg_atomic_read_u32(&rat_shared_state->capture_active))
 		{
 			if (outfile != NULL)
 			{
@@ -237,7 +222,7 @@ rat_bgworker_main(Datum main_arg)
 													  ev->query_len);
 
 						line_len = snprintf(line_buf,
-											RAT_MAX_QUERY_LEN * 2 + 512,
+											RAT_MAX_QUERY_LEN * 2 + 1024,
 											"{\"ts\":%lld,"
 											"\"sid\":\"%08x\","
 											"\"xid\":%u,"
@@ -334,7 +319,7 @@ rat_bgworker_main(Datum main_arg)
 											  ev->query_len);
 
 				line_len = snprintf(line_buf,
-									RAT_MAX_QUERY_LEN * 2 + 512,
+									RAT_MAX_QUERY_LEN * 2 + 1024,
 									"{\"ts\":%lld,"
 									"\"sid\":\"%08x\","
 									"\"xid\":%u,"

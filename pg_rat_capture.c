@@ -12,9 +12,9 @@
  *   and buffer usage. This matches the pg_stat_statements pattern.
  * - ProcessUtility captures DDL, transaction control (BEGIN/COMMIT/ROLLBACK),
  *   SET, COPY, etc. -- essential for faithful replay.
- * - The hot path does zero palloc, no disk I/O, no LWLock. We only
- *   do a SpinLock-protected memcpy of a fixed-size struct into the
- *   ring buffer.
+ * - The hot path does zero palloc, no disk I/O, no locks. Backends
+ *   claim a slot via atomic compare-exchange and write metadata
+ *   directly into shared memory.
  *
  * Copyright (c) 2026, PostgreSQL Global Development Group
  *

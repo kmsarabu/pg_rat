@@ -348,10 +348,7 @@ rat_replay_coordinator_main(Datum main_arg)
 	elog(LOG, "pg_rat: replay loaded %d events across %d sessions",
 		 nevents, nsessions);
 
-	/* Open async libpq connections for each session */
-	snprintf(conninfo, sizeof(conninfo),
-			 "dbname=%s host=/tmp", rat_capture_directory);
-	/* Use a simple local connection */
+	/* Connect via local socket to the current database */
 	snprintf(conninfo, sizeof(conninfo), "dbname=postgres");
 
 	for (i = 0; i < nsessions; i++)

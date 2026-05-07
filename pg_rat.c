@@ -62,19 +62,6 @@ char	   *rat_capture_directory = NULL;
 RatSharedState *rat_shared_state = NULL;
 RatRingBuffer *rat_ring_buffer = NULL;
 
-/* ----------------
- * Capture function declarations (from pg_rat_capture.c)
- * ----------------
- */
-extern void rat_ExecutorEnd(QueryDesc *queryDesc);
-extern void rat_ProcessUtility(PlannedStmt *pstmt,
-							   const char *queryString,
-							   bool readOnlyTree,
-							   ProcessUtilityContext context,
-							   ParamListInfo params,
-							   QueryEnvironment *queryEnv,
-							   DestReceiver *dest,
-							   QueryCompletion *qc);
 
 /* ----------------
  * Saved hook values
@@ -99,8 +86,20 @@ static const ShmemCallbacks rat_shmem_callbacks = {
 static void
 rat_ExecutorEnd_hook(QueryDesc *queryDesc)
 {
-	if (rat_enabled && rat_shared_state && rat_shared_state->capture_active)
-		rat_ExecutorEnd(queryDesc);
+	if (rat_enabled && rat_shared_state &&
+		pg_atomic_read_u32(&rat_shared_state->capture_active))
+	{
+		PG_TRY();
+		{
+			rat_ExecutorEnd(queryDesc);
+		}
+		PG_CATCH();
+		{
+			/* Never let capture errors crash the query */
+			FlushErrorState();
+		}
+		PG_END_TRY();
+	}
 
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
@@ -118,7 +117,8 @@ rat_ProcessUtility_hook(PlannedStmt *pstmt,
 						DestReceiver *dest,
 						QueryCompletion *qc)
 {
-	if (rat_enabled && rat_shared_state && rat_shared_state->capture_active)
+	if (rat_enabled && rat_shared_state &&
+		pg_atomic_read_u32(&rat_shared_state->capture_active))
 		rat_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 						   params, queryEnv, dest, qc);
 
@@ -245,7 +245,7 @@ pg_rat_start_capture(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_rat must be loaded via shared_preload_libraries")));
 
-	if (rat_shared_state->capture_active)
+	if (pg_atomic_read_u32(&rat_shared_state->capture_active))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("a capture session is already active: \"%s\"",
@@ -286,7 +286,7 @@ pg_rat_start_capture(PG_FUNCTION_ARGS)
 	rat_shared_state->capture_start = GetCurrentTimestamp();
 	pg_atomic_write_u64(&rat_shared_state->total_events, 0);
 	pg_atomic_write_u64(&rat_ring_buffer->dropped_events, 0);
-	rat_shared_state->capture_active = true;
+	pg_atomic_write_u32(&rat_shared_state->capture_active, 1);
 	LWLockRelease(&rat_shared_state->lock.lock);
 
 	/* Wake the flusher BGW */
@@ -309,13 +309,13 @@ pg_rat_stop_capture(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_rat must be loaded via shared_preload_libraries")));
 
-	if (!rat_shared_state->capture_active)
+	if (!pg_atomic_read_u32(&rat_shared_state->capture_active))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("no capture session is currently active")));
 
 	LWLockAcquire(&rat_shared_state->lock.lock, LW_EXCLUSIVE);
-	rat_shared_state->capture_active = false;
+	pg_atomic_write_u32(&rat_shared_state->capture_active, 0);
 	LWLockRelease(&rat_shared_state->lock.lock);
 
 	/* Wake flusher to drain remaining events */
@@ -361,9 +361,9 @@ pg_rat_capture_status(PG_FUNCTION_ARGS)
 
 	memset(nulls, 0, sizeof(nulls));
 
-	values[0] = BoolGetDatum(rat_shared_state->capture_active);
+	values[0] = BoolGetDatum(pg_atomic_read_u32(&rat_shared_state->capture_active) != 0);
 	values[1] = CStringGetTextDatum(rat_shared_state->capture_name);
-	if (rat_shared_state->capture_active)
+	if (pg_atomic_read_u32(&rat_shared_state->capture_active))
 		values[2] = TimestampTzGetDatum(rat_shared_state->capture_start);
 	else
 		nulls[2] = true;
@@ -382,12 +382,32 @@ pg_rat_capture_status(PG_FUNCTION_ARGS)
  * Creates a tar.gz archive of the capture directory. Currently a stub
  * that copies the NDJSON directory path to the user.
  */
+/*
+ * Validate a path for safe use in shell commands.
+ * Rejects characters that could cause shell injection.
+ */
+static void
+rat_validate_shell_path(const char *path)
+{
+	const char *p;
+
+	for (p = path; *p; p++)
+	{
+		if (*p == ';' || *p == '|' || *p == '&' || *p == '$' ||
+			*p == '`' || *p == '\'' || *p == '"' || *p == '(' ||
+			*p == ')' || *p == '<' || *p == '>' || *p == '\n' ||
+			*p == '\r' || *p == ' ')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("path contains unsafe character '%c'", *p)));
+	}
+}
+
 Datum
 pg_rat_export_capture(PG_FUNCTION_ARGS)
 {
 	text	   *filepath_text = PG_GETARG_TEXT_PP(0);
 	const char *filepath = text_to_cstring(filepath_text);
-	char		srcdir[MAXPGPATH];
 	char		cmd[MAXPGPATH * 2 + 64];
 	int			rc;
 
@@ -401,8 +421,10 @@ pg_rat_export_capture(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("no capture session has been recorded")));
 
-	snprintf(srcdir, MAXPGPATH, "%s/%s",
-			 rat_capture_directory, rat_shared_state->capture_name);
+	/* Validate paths to prevent shell injection */
+	rat_validate_shell_path(filepath);
+	rat_validate_shell_path(rat_capture_directory);
+	rat_validate_shell_path(rat_shared_state->capture_name);
 
 	snprintf(cmd, sizeof(cmd), "tar czf %s -C %s %s",
 			 filepath, rat_capture_directory, rat_shared_state->capture_name);
@@ -430,6 +452,10 @@ pg_rat_import_capture(PG_FUNCTION_ARGS)
 	const char *filepath = text_to_cstring(filepath_text);
 	char		cmd[MAXPGPATH * 2 + 64];
 	int			rc;
+
+	/* Validate paths to prevent shell injection */
+	rat_validate_shell_path(filepath);
+	rat_validate_shell_path(rat_capture_directory);
 
 	/* Create capture directory if needed */
 	if (MakePGDirectory(rat_capture_directory) != 0 && errno != EEXIST)
