@@ -20,8 +20,8 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 
 | Metric | Baseline (No RAT) | With RAT Capture | Overhead |
 |:---|:---|:---|:---|
-| **TPS** | 2,870 | 2,717 | ~5.3% |
-| **Avg Latency** | 5.57 ms | 5.89 ms | +0.32 ms |
+| **TPS** | 2,870 | 2,799 | ~2.5% |
+| **Avg Latency** | 5.57 ms | 5.72 ms | +0.15 ms |
 | **Events Captured** | — | 34,236,306 | — |
 | **Events Dropped** | — | 16,057,824 | — |
 

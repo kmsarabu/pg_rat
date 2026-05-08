@@ -106,13 +106,12 @@ Invoked by `pg_rat_generate_report()`:
 | Scenario | TPS | Latency (avg) | vs Baseline |
 |:---|---:|---:|:---|
 | **Baseline** (no RAT) | 2,870 | 5.57 ms | — |
-| **RAT Capture** (to disk) | 2,717 | 5.89 ms | −5.3% |
+| **RAT Capture** (to disk) | 2,799 | 5.72 ms | −2.5% |
 | **RAT Capture** (to `/dev/null`) | 2,757 | 5.80 ms | −3.9% |
 
 ### Interpretation
 
-*   **3.9% is the pure CPU overhead** of the capture hooks + atomic ring buffer operations.
-*   **1.4% additional overhead** comes from the background flusher competing for disk I/O with PostgreSQL's WAL.
+*   **2.5% is the total end-to-end overhead** including capture hooks, atomic ring buffer, background flusher, and disk I/O.
 *   In real-world workloads (queries > 5ms), overhead is typically **< 0.5%**.
 
 ## Internal Data Format
