@@ -27,6 +27,8 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 
 > **Note:** This is a *worst-case* benchmark. `pgbench` Scale 1 runs thousands of trivial sub-millisecond queries per second. In real-world workloads where queries take 5–100 ms, the hook overhead is mathematically invisible (< 0.1%).
 
+For detailed visual profiling and system call analysis, see [doc/PERFORMANCE.md](doc/PERFORMANCE.md).
+
 ### Hook-Only Overhead (Capture to `/dev/null`)
 
 | Metric | Baseline | With RAT (no disk) | Overhead |
@@ -34,6 +36,9 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 | **TPS** | 2,870 | 2,757 | **~3.9%** |
 
 This isolates the pure CPU cost of the capture hooks from disk I/O, proving the extension's logic adds minimal overhead.
+
+### 🔍 Deep Dive: Performance & Flamegraphs
+For a detailed analysis of system call optimizations and visual CPU profiles, see the [Performance Deep Dive](doc/PERFORMANCE.md).
 
 ### Why Events Are Dropped
 

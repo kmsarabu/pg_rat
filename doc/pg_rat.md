@@ -114,6 +114,8 @@ Invoked by `pg_rat_generate_report()`:
 *   **2.5% is the total end-to-end overhead** including capture hooks, atomic ring buffer, background flusher, and disk I/O.
 *   In real-world workloads (queries > 5ms), overhead is typically **< 0.5%**.
 
+For detailed visual profiling and system call analysis, see [PERFORMANCE.md](PERFORMANCE.md).
+
 ## Internal Data Format
 
 Workload files (`.ndjson`) use one JSON object per line:
