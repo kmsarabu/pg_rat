@@ -4,7 +4,7 @@ This document provides a deep dive into the performance profile of `pg_rat`, inc
 
 ## 1. Visual Profiling (Flamegraphs)
 
-To validate the measured 2.5% overhead, we use Linux `perf` and Brendan Gregg's FlameGraph tools to visualize the CPU distribution of a PostgreSQL instance under heavy load.
+To validate the performance impact, we use Linux `perf` and Brendan Gregg's FlameGraph tools to visualize the CPU distribution of a PostgreSQL instance under heavy load. In 10-minute sustained stress tests, `pg_rat` capture introduced a ~7.2% throughput overhead in the worst-case `pgbench` scale-1 workload.
 
 ### Baseline (No Capture)
 In a standard `pgbench` (Scale 1) run, the profile is dominated by PostgreSQL core functions: `exec_simple_query`, `ExecutePlan`, and `heap_getnext`.
@@ -17,7 +17,7 @@ When `pg_rat` is active, the profile remains largely unchanged, with the extensi
 - **`rat_ring_buffer_push`**: The atomic slot reservation logic.
 - **`pg_atomic_compare_exchange_u64`**: The core synchronization primitive.
 
-The relative width of these functions in the flamegraph confirms the measured overhead. On an ARM64 (LinuxKit) environment, these functions combined account for less than 3% of the total CPU time during a high-concurrency stress test.
+In this profile, the visible pg_rat hot-path functions are each below 1%, with `rat_ExecutorEnd_hook` around 0.32%, `rat_ExecutorEnd` around 0.03%, and `rat_ring_buffer_push` around 0.01%. This does not mean total end-to-end overhead is only those symbols, because throughput regression can also come from indirect effects such as cache pressure, atomic contention, extra memory copying, and background flusher activity.
 
 ## 2. System Call Optimization: The "SetLatch" Problem
 

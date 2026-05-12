@@ -105,14 +105,13 @@ Invoked by `pg_rat_generate_report()`:
 
 | Scenario | TPS | Latency (avg) | vs Baseline |
 |:---|---:|---:|:---|
-| **Baseline** (no RAT) | 2,870 | 5.57 ms | — |
-| **RAT Capture** (to disk) | 2,799 | 5.72 ms | −2.5% |
-| **RAT Capture** (to `/dev/null`) | 2,757 | 5.80 ms | −3.9% |
+| **True Baseline** (No extension) | 2,797 | 5.72 ms | — |
+| **RAT Capture** (to disk) | 2,594 | 6.17 ms | −7.2% |
 
 ### Interpretation
 
-*   **2.5% is the total end-to-end overhead** including capture hooks, atomic ring buffer, background flusher, and disk I/O.
-*   In real-world workloads (queries > 5ms), overhead is typically **< 0.5%**.
+*   **7.2% is the total end-to-end overhead** in a sustained, worst-case stress test.
+*   In real-world workloads where statement execution time is significantly longer than the fixed hook cost, overhead is expected to be much lower (< 1%).
 
 For detailed visual profiling and system call analysis, see [PERFORMANCE.md](PERFORMANCE.md).
 

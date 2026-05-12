@@ -64,7 +64,8 @@ typedef enum RatSlotStatus
 {
 	RAT_SLOT_EMPTY = 0,
 	RAT_SLOT_BUSY,
-	RAT_SLOT_READY
+	RAT_SLOT_READY,
+	RAT_SLOT_DROPPED
 } RatSlotStatus;
 
 /* ----------------
@@ -180,7 +181,8 @@ extern void rat_ProcessUtility(PlannedStmt *pstmt,
 							   ParamListInfo params,
 							   QueryEnvironment *queryEnv,
 							   DestReceiver *dest,
-							   QueryCompletion *qc);
+							   QueryCompletion *qc,
+							   double duration_ms);
 
 /* ----------------
  * Shared memory functions (pg_rat_shmem.c)

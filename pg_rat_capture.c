@@ -83,14 +83,15 @@ rat_ExecutorEnd(QueryDesc *queryDesc)
 	/* Copy query text pointer and length */
 	query_text = queryDesc->sourceText;
 	qlen = (int) strlen(query_text);
-	if (qlen >= RAT_MAX_QUERY_LEN)
-		qlen = RAT_MAX_QUERY_LEN - 1;
+	qlen = Min(qlen, rat_max_query_length - 1);
+	qlen = Min(qlen, RAT_MAX_QUERY_LEN - 1);
 
 	/* Push into ring buffer directly */
-	rat_ring_buffer_push(&meta, query_text, qlen);
-
-	/* Increment total event counter */
-	pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
+	if (rat_ring_buffer_push(&meta, query_text, qlen))
+	{
+		/* Increment total event counter on success */
+		pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
+	}
 }
 
 /*
@@ -108,7 +109,8 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 				   ParamListInfo params,
 				   QueryEnvironment *queryEnv,
 				   DestReceiver *dest,
-				   QueryCompletion *qc)
+				   QueryCompletion *qc,
+				   double duration_ms)
 {
 	RatEventMeta meta;
 	Node	   *parsetree = pstmt->utilityStmt;
@@ -118,10 +120,9 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 	if (queryString == NULL)
 		return;
 
-	/* Time the utility execution is handled by the caller hook wrapper,
-	 * so we just capture the event with a timestamp. Note: the actual utility
-	 * hasn't executed yet at this point, so duration will be 0 for the
-	 * pre-execution hook. We still capture it for replay ordering. */
+	/* Capture is called *after* utility execution to record duration.
+	 * If execution failed, it bypasses this hook via PG_CATCH/longjmp,
+	 * ensuring we only record successful utilities. */
 
 	meta.timestamp = GetCurrentTimestamp();
 	meta.session_id = rat_compute_session_id();
@@ -158,7 +159,7 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 		meta.event_type = RAT_EVENT_UTILITY;
 	}
 
-	meta.duration_ms = 0.0;	/* pre-execution capture */
+	meta.duration_ms = duration_ms;
 	meta.rows = 0;
 	meta.shared_blks_hit = 0;
 	meta.shared_blks_read = 0;
@@ -166,12 +167,13 @@ rat_ProcessUtility(PlannedStmt *pstmt,
 	/* Copy query text pointer and length */
 	query_text = queryString;
 	qlen = (int) strlen(query_text);
-	if (qlen >= RAT_MAX_QUERY_LEN)
-		qlen = RAT_MAX_QUERY_LEN - 1;
+	qlen = Min(qlen, rat_max_query_length - 1);
+	qlen = Min(qlen, RAT_MAX_QUERY_LEN - 1);
 
 	/* Push into ring buffer */
-	rat_ring_buffer_push(&meta, query_text, qlen);
-
-	/* Increment total counter */
-	pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
+	if (rat_ring_buffer_push(&meta, query_text, qlen))
+	{
+		/* Increment total counter on success */
+		pg_atomic_fetch_add_u64(&rat_shared_state->total_events, 1);
+	}
 }

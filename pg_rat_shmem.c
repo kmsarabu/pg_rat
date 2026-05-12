@@ -112,11 +112,12 @@ bool rat_ring_buffer_push(RatEventMeta *meta, const char *query_text,
   uint64 head, tail;
   uint32 idx;
   RatEvent *slot;
+  int retries = 0;
 
   if (rat_ring_buffer == NULL)
     return false;
 
-  /* Reserve a slot atomically */
+  /* Reserve a slot atomically, but don't advance head until the slot is ready */
   do {
     head = pg_atomic_read_u64(&rat_ring_buffer->head);
     tail = pg_atomic_read_u64(&rat_ring_buffer->tail);
@@ -127,26 +128,22 @@ bool rat_ring_buffer_push(RatEventMeta *meta, const char *query_text,
       return false;
     }
 
-  } while (
-      !pg_atomic_compare_exchange_u64(&rat_ring_buffer->head, &head, head + 1));
+    idx = (uint32)(head % rat_ring_buffer->capacity);
+    slot = &rat_ring_buffer->events[idx];
 
-  /* We have claimed slot 'head' */
-  idx = (uint32)(head % rat_ring_buffer->capacity);
-  slot = &rat_ring_buffer->events[idx];
-
-  /* Wait if the slot hasn't been emptied by flusher yet (rare) */
-  {
-    int retries = 0;
-
-    while (pg_atomic_read_u32(&slot->status) != RAT_SLOT_EMPTY) {
+    /* Ensure the slot is EMPTY before we claim this sequence number */
+    if (pg_atomic_read_u32(&slot->status) != RAT_SLOT_EMPTY) {
       if (++retries > 10000) {
         /* Flusher is stuck or too slow — drop rather than hang */
         pg_atomic_fetch_add_u64(&rat_ring_buffer->dropped_events, 1);
         return false;
       }
       SPIN_DELAY();
+      continue;
     }
-  }
+
+  } while (
+      !pg_atomic_compare_exchange_u64(&rat_ring_buffer->head, &head, head + 1));
 
   /* Mark busy and write metadata directly to shmem */
   pg_atomic_write_u32(&slot->status, RAT_SLOT_BUSY);

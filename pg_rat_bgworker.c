@@ -169,11 +169,11 @@ rat_bgworker_main(Datum main_arg)
 	/* Allocate drain buffer in local memory (not shared) */
 	drain_buf = (RatEvent *) palloc(sizeof(RatEvent) * RAT_DRAIN_BATCH);
 
-	/* Buffer for JSON-escaped query text: worst case 2x + some slack */
-	escaped_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 2 + 16);
+	/* Buffer for JSON-escaped query text: worst case \u00XX is 6x */
+	escaped_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 6 + 1);
 
 	/* Line buffer for NDJSON output */
-	line_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 2 + 1024);
+	line_buf = (char *) palloc(RAT_MAX_QUERY_LEN * 6 + 1024);
 
 	/* Main loop */
 	for (;;)
@@ -222,7 +222,7 @@ rat_bgworker_main(Datum main_arg)
 													  ev->query_len);
 
 						line_len = snprintf(line_buf,
-											RAT_MAX_QUERY_LEN * 2 + 1024,
+											RAT_MAX_QUERY_LEN * 6 + 1024,
 											"{\"ts\":%lld,"
 											"\"sid\":\"%08x\","
 											"\"xid\":%u,"
@@ -244,11 +244,15 @@ rat_bgworker_main(Datum main_arg)
 											ev->query_len,
 											escaped_buf);
 
-						fwrite(line_buf, 1, line_len, outfile);
-						file_bytes += line_len;
+						if (line_len > RAT_MAX_QUERY_LEN * 6 + 1023)
+							line_len = RAT_MAX_QUERY_LEN * 6 + 1023;
+						if (line_len > 0)
+						{
+							fwrite(line_buf, 1, line_len, outfile);
+							file_bytes += line_len;
+						}
 					}
 				}
-				fflush(outfile);
 				fclose(outfile);
 				outfile = NULL;
 				file_seq = 0;
@@ -268,7 +272,6 @@ rat_bgworker_main(Datum main_arg)
 		{
 			if (outfile != NULL)
 			{
-				fflush(outfile);
 				fclose(outfile);
 			}
 
@@ -319,7 +322,7 @@ rat_bgworker_main(Datum main_arg)
 											  ev->query_len);
 
 				line_len = snprintf(line_buf,
-									RAT_MAX_QUERY_LEN * 2 + 1024,
+									RAT_MAX_QUERY_LEN * 6 + 1024,
 									"{\"ts\":%lld,"
 									"\"sid\":\"%08x\","
 									"\"xid\":%u,"
@@ -341,11 +344,14 @@ rat_bgworker_main(Datum main_arg)
 									ev->query_len,
 									escaped_buf);
 
-				fwrite(line_buf, 1, line_len, outfile);
-				file_bytes += line_len;
+				if (line_len > RAT_MAX_QUERY_LEN * 6 + 1023)
+					line_len = RAT_MAX_QUERY_LEN * 6 + 1023;
+				if (line_len > 0)
+				{
+					fwrite(line_buf, 1, line_len, outfile);
+					file_bytes += line_len;
+				}
 			}
-
-			fflush(outfile);
 		}
 	}
 

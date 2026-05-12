@@ -38,6 +38,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/timestamp.h"
+#include "portability/instr_time.h"
 
 #include "pg_rat.h"
 
@@ -117,10 +118,10 @@ rat_ProcessUtility_hook(PlannedStmt *pstmt,
 						DestReceiver *dest,
 						QueryCompletion *qc)
 {
-	if (rat_enabled && rat_shared_state &&
-		pg_atomic_read_u32(&rat_shared_state->capture_active))
-		rat_ProcessUtility(pstmt, queryString, readOnlyTree, context,
-						   params, queryEnv, dest, qc);
+	instr_time	start_time, end_time;
+	double		msec = 0;
+
+	INSTR_TIME_SET_CURRENT(start_time);
 
 	if (prev_ProcessUtility)
 		prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -128,6 +129,15 @@ rat_ProcessUtility_hook(PlannedStmt *pstmt,
 	else
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
+
+	INSTR_TIME_SET_CURRENT(end_time);
+	INSTR_TIME_SUBTRACT(end_time, start_time);
+	msec = INSTR_TIME_GET_MILLISEC(end_time);
+
+	if (rat_enabled && rat_shared_state &&
+		pg_atomic_read_u32(&rat_shared_state->capture_active))
+		rat_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+						   params, queryEnv, dest, qc, msec);
 }
 
 /* ----------------
@@ -411,6 +421,11 @@ pg_rat_export_capture(PG_FUNCTION_ARGS)
 	char		cmd[MAXPGPATH * 2 + 64];
 	int			rc;
 
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to use pg_rat_export_capture")));
+
 	if (!rat_shared_state)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -452,6 +467,11 @@ pg_rat_import_capture(PG_FUNCTION_ARGS)
 	const char *filepath = text_to_cstring(filepath_text);
 	char		cmd[MAXPGPATH * 2 + 64];
 	int			rc;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to use pg_rat_import_capture")));
 
 	/* Validate paths to prevent shell injection */
 	rat_validate_shell_path(filepath);

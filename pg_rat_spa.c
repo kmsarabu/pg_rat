@@ -33,8 +33,7 @@
 /* Hash table entry for unique query deduplication */
 typedef struct SpaQueryEntry
 {
-	uint32		hash;						/* hash key */
-	char		query_text[RAT_MAX_QUERY_LEN];
+	char		query_text[RAT_MAX_QUERY_LEN]; /* hash key */
 	double		source_elapsed_ms;			/* original duration */
 	int64		source_rows;
 	int64		source_blks_hit;
@@ -115,7 +114,7 @@ pg_rat_run_spa(PG_FUNCTION_ARGS)
 
 	/* Create local hash table for query deduplication */
 	memset(&hash_info, 0, sizeof(hash_info));
-	hash_info.keysize = sizeof(uint32);
+	hash_info.keysize = RAT_MAX_QUERY_LEN;
 	hash_info.entrysize = sizeof(SpaQueryEntry);
 	query_hash = hash_create("pg_rat SPA queries",
 							 RAT_SPA_MAX_QUERIES,
@@ -240,14 +239,15 @@ pg_rat_run_spa(PG_FUNCTION_ARGS)
 				rows = p ? strtoll(p + 7, NULL, 10) : 0;
 			}
 
-			/* Hash and insert/update */
-			qhash = spa_query_hash(query, strlen(query));
+			/* Use query text directly as hash key */
+			char search_key[RAT_MAX_QUERY_LEN];
+			MemSet(search_key, 0, RAT_MAX_QUERY_LEN);
+			strlcpy(search_key, query, RAT_MAX_QUERY_LEN);
 
-			entry = (SpaQueryEntry *) hash_search(query_hash, &qhash,
+			entry = (SpaQueryEntry *) hash_search(query_hash, search_key,
 												  HASH_ENTER, &found);
 			if (!found)
 			{
-				strlcpy(entry->query_text, query, RAT_MAX_QUERY_LEN);
 				entry->source_elapsed_ms = dur_ms;
 				entry->source_rows = rows;
 				entry->source_blks_hit = blk_hit;
@@ -318,6 +318,12 @@ pg_rat_run_spa(PG_FUNCTION_ARGS)
 							 entry->query_text);
 
 			/* Execute EXPLAIN ANALYZE - catch errors gracefully */
+			/* Restrict to SELECT queries for safety to prevent DML mutation */
+			if (strncasecmp(entry->query_text, "SELECT", 6) != 0)
+			{
+				target_elapsed = -1.0;
+				goto skip_explain;
+			}
 			PG_TRY();
 			{
 				ret = SPI_execute(explain_query.data, true, 0);
@@ -355,6 +361,7 @@ pg_rat_run_spa(PG_FUNCTION_ARGS)
 				target_elapsed = -1.0;
 			}
 			PG_END_TRY();
+skip_explain:
 
 			/* Compute regression percentage */
 			if (entry->source_elapsed_ms > 0 && target_elapsed > 0)
@@ -367,7 +374,7 @@ pg_rat_run_spa(PG_FUNCTION_ARGS)
 							 "INSERT INTO pg_rat_spa_results VALUES "
 							 "(%u, $1, %f, %f, %lld, "
 							 "%lld, %f, %s, $2, %d)",
-							 entry->hash,
+							 spa_query_hash(entry->query_text, strlen(entry->query_text)),
 							 entry->source_elapsed_ms,
 							 target_elapsed,
 							 (long long) (entry->source_blks_hit + entry->source_blks_read),

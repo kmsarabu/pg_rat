@@ -7,7 +7,7 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 ## 🚀 Key Features
 
 *   **Lock-Free Workload Capture:** Uses an atomic compare-exchange shared memory ring buffer and a background flusher to capture SQL queries (DDL, DML, and Utility) with minimal performance impact.
-*   **Workload Replay:** Native replay coordinator that mimics original session concurrency, transaction ordering, and relative timing offsets using `libpq` connections.
+*   **Workload Replay:** Native replay coordinator that preserves session mapping and relative event timing on a best-effort basis (full asynchronous concurrent replay is planned).
 *   **SQL Performance Analyzer (SPA):** Automated per-query analysis comparing source metrics (captured) against target performance (`EXPLAIN ANALYZE`).
 *   **Visual Reporting:** Generates modern, dark-mode HTML reports with statistical summaries of regressions, improvements, and execution plan changes.
 *   **NDJSON Storage:** Workloads are stored in human-readable, line-delimited JSON format for easy analysis or transformation.
@@ -16,35 +16,27 @@ Inspired by Oracle RAT, `pg_rat` is designed to de-risk database migrations, maj
 
 `pg_rat` is built for production environments where performance is non-negotiable.
 
-### Benchmark Results (pgbench, Scale 1, 30 minutes)
+### Capture Overhead Summary
 
-| Metric | Baseline (No RAT) | With RAT Capture | Overhead |
-|:---|:---|:---|:---|
-| **TPS** | 2,870 | 2,799 | ~2.5% |
-| **Avg Latency** | 5.57 ms | 5.72 ms | +0.15 ms |
-| **Events Captured** | — | 34,236,306 | — |
-| **Events Dropped** | — | 16,057,824 | — |
+In a worst-case `pgbench` scale-1 workload, where each transaction is very small and PostgreSQL executes thousands of short statements per second, pg_rat capture introduced approximately 7% throughput overhead.
 
-> **Note:** This is a *worst-case* benchmark. `pgbench` Scale 1 runs thousands of trivial sub-millisecond queries per second. In real-world workloads where queries take 5–100 ms, the hook overhead is mathematically invisible (< 0.1%).
+| Test | TPS | Avg Latency | vs Baseline |
+|---|---:|---:|---:|
+| **True Baseline** (No extension) | 2,797 | 5.72 ms | — |
+| **RAT Capture Active** | 2,594 | 6.17 ms | ~7.2% |
 
-For detailed visual profiling and system call analysis, see [doc/PERFORMANCE.md](doc/PERFORMANCE.md).
-
-### Hook-Only Overhead (Capture to `/dev/null`)
-
-| Metric | Baseline | With RAT (no disk) | Overhead |
-|:---|:---|:---|:---|
-| **TPS** | 2,870 | 2,757 | **~3.9%** |
-
-This isolates the pure CPU cost of the capture hooks from disk I/O, proving the extension's logic adds minimal overhead.
+This benchmark intentionally stresses the capture path with very short statements. For longer-running application queries, the fixed per-statement capture cost is expected to be a much smaller percentage of total query latency, but users should benchmark with their own workload before enabling production capture.
 
 ### 🔍 Deep Dive: Performance & Flamegraphs
-For a detailed analysis of system call optimizations and visual CPU profiles, see the [Performance Deep Dive](doc/PERFORMANCE.md).
+
+For detailed visual profiling and system call analysis, see the [Performance Deep Dive](doc/PERFORMANCE.md).
 
 ### Why Events Are Dropped
 
-Drops are a **safety feature**, not a bug. When the background flusher cannot keep up with disk I/O, `pg_rat` drops events rather than blocking your application queries. To minimize drops:
-*   Use a dedicated fast SSD for `pg_rat.capture_directory`
-*   Increase `pg_rat.ring_buffer_size` for bursty workloads
+The benchmark intentionally prioritizes database latency over capture completeness. Dropped events indicate the flusher or storage path could not keep up with event production. This is expected under extreme pgbench scale-1 pressure, but for production RAT use, dropped events should be monitored and minimized by:
+*   Using a dedicated fast SSD for `pg_rat.capture_directory`
+*   Increasing `pg_rat.ring_buffer_size` for bursty workloads
+*   Reducing capture scope where possible
 
 ## 🛠 Installation
 
