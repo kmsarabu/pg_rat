@@ -7,10 +7,22 @@ This document provides a deep dive into the performance profile of `pg_rat`, inc
 To validate the performance impact, we use Linux `perf` and Brendan Gregg's FlameGraph tools to visualize the CPU distribution of a PostgreSQL instance under heavy load. In 10-minute sustained stress tests, `pg_rat` capture introduced a ~7.2% throughput overhead in the worst-case `pgbench` scale-1 workload.
 
 ### Baseline (No Capture)
+![PostgreSQL Baseline Flamegraph](../static/flame_baseline.svg)
+
 In a standard `pgbench` (Scale 1) run, the profile is dominated by PostgreSQL core functions: `exec_simple_query`, `ExecutePlan`, and `heap_getnext`.
 
 ### With pg_rat Capture Active
+![PostgreSQL with pg_rat Capture Flamegraph](../static/flame_with_rat.svg)
+
 When `pg_rat` is active, the profile remains largely unchanged, with the extension's footprint appearing as thin "slivers" in the stack. 
+
+### Regression Interpretation
+
+In this 10-minute pgbench scale-1 test, pg_rat capture reduced throughput from 2,797 TPS to 2,594 TPS, or approximately 7.2%. Average latency increased from 5.72 ms to 6.17 ms.
+
+This is a deliberately harsh workload for pg_rat because pgbench scale 1 executes many very small statements. The fixed per-statement capture cost is therefore a larger percentage of total runtime than it would be for longer application queries.
+
+The flamegraphs show that PostgreSQL core execution paths remain dominant. pg_rat-specific functions are visible but narrow, indicating that the regression is not caused by one large CPU hotspot. Instead, the overhead is distributed across timestamp collection, query-text copying, atomic ring-buffer coordination, memory/cache effects, and asynchronous flushing.
 
 **Key observation points in the flamegraph:**
 - **`rat_ExecutorEnd`**: The entry point for DML capture.
@@ -33,7 +45,7 @@ We refactored the signaling logic to be asynchronous:
 - **Batched Signaling**: Backends only signal the flusher if they observe the ring buffer is reaching a certain threshold, or on a timed interval.
 - **Flusher Polling**: The background flusher uses an efficient `WaitLatch` loop with a short timeout (100ms), ensuring it drains the buffer even without explicit signals.
 
-**Result**: TPS increased by ~7% and CPU "System" time dropped significantly, bringing the capture overhead into the <3% range.
+**Result**: This refactoring reclaimed significant throughput (approx. 7% gain compared to the synchronous model) and dramatically reduced CPU "System" time. Even with these optimizations, the worst-case `pgbench` scale-1 workload still shows a ~7% total capture overhead, which is expected due to the extreme frequency of statements in this specific benchmark.
 
 ## 3. How to Reproduce Flamegraphs
 
@@ -45,12 +57,12 @@ Start `pgbench` in the background, then record a multi-minute sample for better 
 # Start capture
 ./pg_install/bin/psql postgres -c "SELECT pg_rat_start_capture('flame_test');"
 
-# Start pgbench (10 minutes)
-./pg_install/bin/pgbench -c 16 -j 4 -T 600 postgres &
+# Start pgbench (11 minutes to allow for warm-up/cool-down)
+./pg_install/bin/pgbench -c 16 -j 4 -T 660 postgres &
 
-# Record 9 minutes of CPU samples
-sleep 5
-sudo perf record -F 99 -a -g -- sleep 550
+# Record 10 minutes of CPU samples after 30s warm-up
+sleep 30
+sudo perf record -F 99 -a -g -- sleep 600
 
 # Stop capture
 ./pg_install/bin/psql postgres -c "SELECT pg_rat_stop_capture();"
