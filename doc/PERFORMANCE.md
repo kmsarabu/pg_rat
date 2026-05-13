@@ -25,13 +25,15 @@ This is a deliberately harsh workload for pg_rat because pgbench scale 1 execute
 The flamegraphs show that PostgreSQL core execution paths remain dominant. pg_rat-specific functions are visible but narrow, indicating that the regression is not caused by one large CPU hotspot. Instead, the overhead is distributed across timestamp collection, query-text copying, atomic ring-buffer coordination, memory/cache effects, and asynchronous flushing.
 
 **Key observation points in the flamegraph:**
-- **`rat_ExecutorEnd`**: The entry point for DML capture.
-- **`rat_ring_buffer_push`**: The atomic slot reservation logic.
-- **`pg_atomic_compare_exchange_u64`**: The core synchronization primitive.
+- **`rat_ExecutorEnd_hook`**: The executor hook wrapper installed by pg_rat.
+- **`rat_ExecutorEnd`**: DML/SELECT capture after executor completion.
+- **`rat_ring_buffer_push`**: Shared-memory ring-buffer insertion path.
+- **`rat_ProcessUtility_hook` / `rat_ProcessUtility`**: Utility-statement capture path.
+- **`rat_bgworker_main`**: Background flusher process that drains shared memory and writes NDJSON.
 
-In this profile, the visible pg_rat hot-path functions are each below 1%, with `rat_ExecutorEnd_hook` around 0.32%, `rat_ExecutorEnd` around 0.03%, and `rat_ring_buffer_push` around 0.01%. This does not mean total end-to-end overhead is only those symbols, because throughput regression can also come from indirect effects such as cache pressure, atomic contention, extra memory copying, and background flusher activity.
+`pg_atomic_compare_exchange_u64` is used inside the ring-buffer implementation, but it may not appear as a separate frame in optimized builds because the compiler/platform can inline it into lower-level atomic instructions.
 
-## 2. System Call Optimization: The "SetLatch" Problem
+## 2. Flusher Wakeup Optimization
 
 During early development, we identified a significant performance bottleneck involving system calls.
 
@@ -78,14 +80,17 @@ sudo perf script | ./FlameGraph/stackcollapse-perf.pl | \
   ./FlameGraph/flamegraph.pl --title "pg_rat Capture Profile" > pg_rat_flame.svg
 ```
 
-## 4. System Call Comparison
+## 4. Future Work: System Call Validation
 
-Comparing `strace` results before and after the optimization:
+Earlier versions of pg_rat used more frequent latch wakeups for the background flusher. The current implementation uses a periodic/asynchronous wake model to avoid waking the flusher for every captured event.
 
-| System Call | Before Optimization | After Optimization |
-| :--- | :--- | :--- |
-| `futex` / `kill` | High (1 per query) | Low (Periodic) |
-| `write` (NDJSON) | Batched | Batched |
-| `clock_gettime` | 1 per query | 1 per query |
+This document does not include syscall-frequency measurements. A future validation pass should use tools such as `strace`, `perf trace`, or eBPF-based tracing to compare syscall counts with capture disabled and capture enabled.
+
+Suggested metrics to collect:
+- `futex`
+- `kill` / signal-related wakeups
+- `write` / `pwrite`
+- `clock_gettime`
+- context switches
 
 By eliminating the per-query signaling overhead, `pg_rat` achieves production-grade efficiency while maintaining high-fidelity capture.
